@@ -1,4 +1,5 @@
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { AUCTION_GOALS, MetrikaRole, reachMetrikaGoal } from './analytics'
 
 type Role = 'seller' | 'buyer'
 type AuctionStatus = 'draft' | 'published' | 'finished'
@@ -85,6 +86,28 @@ function CianLogo() {
   )
 }
 
+function RoleQuiz({ selectedRole, onSelect, onContinue }: { selectedRole: Role | null; onSelect: (role: Role) => void; onContinue: () => void }) {
+  const roles: Array<{ id: Role; title: string; text: string; icon: string }> = [
+    { id: 'seller', title: 'Я продаю квартиру', text: 'Настрою условия и опубликую аукцион', icon: '⌂' },
+    { id: 'buyer', title: 'Я покупаю квартиру', text: 'Посмотрю лот и сделаю ставку', icon: '₽' },
+  ]
+
+  return <section className="role-quiz">
+    <div className="quiz-progress"><span className="quiz-progress__back">←</span><i /><i /><i /></div>
+    <p className="eyebrow">Первый шаг</p>
+    <h1>Как вы хотите участвовать?</h1>
+    <p className="muted">Выберите роль — в любой момент её можно будет изменить.</p>
+    <div className="role-options" role="radiogroup" aria-label="Роль в аукционе">
+      {roles.map((option) => <button key={option.id} className={`role-option ${selectedRole === option.id ? 'role-option--selected' : ''}`} role="radio" aria-checked={selectedRole === option.id} onClick={() => onSelect(option.id)}>
+        <span className="role-option__icon" aria-hidden="true">{option.icon}</span>
+        <span className="role-option__copy"><b>{option.title}</b><small>{option.text}</small></span>
+        <span className="role-option__radio" aria-hidden="true" />
+      </button>)}
+    </div>
+    <div className="quiz-footer"><button className="primary-button" disabled={!selectedRole} onClick={onContinue}>Продолжить <Arrow /></button></div>
+  </section>
+}
+
 function App() {
   const [role, setRole] = useState<Role>('seller')
   const [auction, setAuction] = useState<Auction>(INITIAL_AUCTION)
@@ -98,6 +121,8 @@ function App() {
   const [bidStatus, setBidStatus] = useState<BidStatus>('idle')
   const [demoResponse, setDemoResponse] = useState<DemoResponse>('accepted')
   const [isDemoOpen, setIsDemoOpen] = useState(false)
+  const [isRoleQuizOpen, setIsRoleQuizOpen] = useState(true)
+  const [selectedRole, setSelectedRole] = useState<Role | null>(null)
 
   const minimumBid = auction.currentPrice + auction.step
   const isPublished = auction.status === 'published'
@@ -113,16 +138,34 @@ function App() {
     return 3
   }, [auction.status])
 
+  const currentScreen = isRoleQuizOpen
+    ? 'role-choice'
+    : role === 'seller'
+      ? `seller-${sellerScreen}-${auction.status}`
+      : auction.status === 'draft'
+        ? 'buyer-empty'
+        : `buyer-${buyerScreen}-${auction.status}${buyerScreen === 'card' ? `-${bidStatus}` : ''}`
+
+  useEffect(() => {
+    reachMetrikaGoal(AUCTION_GOALS.screenView, {
+      step: currentScreen,
+      role: isRoleQuizOpen ? 'visitor' : role,
+      screen: currentScreen,
+    })
+  }, [currentScreen, isRoleQuizOpen, role])
+
   const checkAuction = (event: FormEvent) => {
     event.preventDefault()
     const nextStartPrice = Number(startPrice)
     const nextStep = Number(step)
     if (!nextStartPrice || !nextStep || !endDate || nextStep <= 0) {
       setFormError('Заполните цену, шаг ставки и дату окончания.')
+      reachMetrikaGoal(AUCTION_GOALS.sellerConditionsInvalid, { step: 'seller-setup', role: 'seller', result: 'error' })
       return
     }
     if (nextStep >= nextStartPrice) {
       setFormError('Шаг ставки должен быть меньше стартовой цены.')
+      reachMetrikaGoal(AUCTION_GOALS.sellerConditionsInvalid, { step: 'seller-setup', role: 'seller', result: 'error' })
       return
     }
     setFormError('')
@@ -134,33 +177,65 @@ function App() {
       endDate,
     }))
     setSellerScreen('review')
+    reachMetrikaGoal(AUCTION_GOALS.sellerConditionsChecked, { step: 'seller-setup', role: 'seller', result: 'success' })
   }
 
   const publishAuction = () => {
     setAuction((current) => ({ ...current, status: 'published' }))
     setSellerScreen('published')
+    reachMetrikaGoal(AUCTION_GOALS.auctionPublished, { step: 'seller-review', role: 'seller', result: 'success' })
   }
 
   const submitBid = (event: FormEvent) => {
     event.preventDefault()
     if (!numericBid || numericBid < minimumBid) {
       setBidStatus('below-minimum')
+      reachMetrikaGoal(AUCTION_GOALS.bidBelowMinimum, { step: 'buyer-card', role: 'buyer', result: 'error' })
       return
     }
     setBidStatus('pending')
+    reachMetrikaGoal(AUCTION_GOALS.bidSubmitted, { step: 'buyer-card', role: 'buyer' })
     window.setTimeout(() => {
       if (demoResponse === 'error') {
         setBidStatus('error')
+        reachMetrikaGoal(AUCTION_GOALS.bidError, { step: 'buyer-card', role: 'buyer', result: 'error' })
         return
       }
       setAuction((current) => ({ ...current, currentPrice: numericBid }))
       setBidStatus('accepted')
+      reachMetrikaGoal(AUCTION_GOALS.bidAccepted, { step: 'buyer-card', role: 'buyer', result: 'success' })
     }, 900)
   }
 
-  const selectRole = (nextRole: Role) => {
+  const selectRole = (nextRole: Role, step = 'role-choice') => {
     setRole(nextRole)
     if (nextRole === 'buyer' && auction.status !== 'draft') setBuyerScreen('feed')
+    reachMetrikaGoal(AUCTION_GOALS.roleSelected, { step, role: nextRole })
+  }
+
+  const openRoleQuiz = (nextRole: Role = role) => {
+    setSelectedRole(nextRole)
+    setIsRoleQuizOpen(true)
+  }
+
+  const confirmRole = () => {
+    if (!selectedRole) return
+    selectRole(selectedRole)
+    setIsRoleQuizOpen(false)
+  }
+
+  const goToSellerSetup = () => {
+    setRole('seller')
+    setSellerScreen('setup')
+    setIsRoleQuizOpen(false)
+    reachMetrikaGoal(AUCTION_GOALS.buyerEmptyToSeller, { step: 'buyer-empty', role: 'buyer' })
+  }
+
+  const goToBuyerCard = () => {
+    setRole('buyer')
+    setBuyerScreen('card')
+    setIsRoleQuizOpen(false)
+    reachMetrikaGoal(AUCTION_GOALS.buyerLotOpened, { step: 'seller-published', role: 'buyer' })
   }
 
   const resetDemo = () => {
@@ -181,17 +256,15 @@ function App() {
         <div className="brand">
           <CianLogo />
         </div>
-        <div className="role-switcher" aria-label="Выбор роли">
-          <button className={role === 'seller' ? 'active' : ''} onClick={() => selectRole('seller')}>Продавец</button>
-          <button className={role === 'buyer' ? 'active' : ''} onClick={() => selectRole('buyer')}>Покупатель</button>
-        </div>
+        <div className="topbar__actions"><a className="map-link" href="/map">Карта</a><button className="role-change" onClick={() => openRoleQuiz()}><span>Роль</span><b>{role === 'seller' ? 'Продавец' : 'Покупатель'}</b><i>↔</i></button></div>
       </header>
 
-      <section className="role-note">
-        <span className="role-note__dot" />
-        <span>Режим: <b>{role === 'seller' ? 'продавец' : 'покупатель'}</b></span>
-        <span className="role-note__hint">Переключайте роль вверху</span>
-      </section>
+      {isRoleQuizOpen ? <RoleQuiz selectedRole={selectedRole} onSelect={setSelectedRole} onContinue={confirmRole} /> : <>
+        <section className="role-note">
+          <span className="role-note__dot" />
+          <span>Режим: <b>{role === 'seller' ? 'продавец' : 'покупатель'}</b></span>
+          <span className="role-note__hint">Роль можно изменить в шапке</span>
+        </section>
 
       {role === 'seller' ? (
         <SellerFlow
@@ -206,9 +279,9 @@ function App() {
           onStep={setStep}
           onEndDate={setEndDate}
           onCheck={checkAuction}
-          onEdit={() => setSellerScreen('setup')}
+          onEdit={() => { setSellerScreen('setup'); reachMetrikaGoal(AUCTION_GOALS.sellerConditionsEdited, { step: 'seller-review', role: 'seller' }) }}
           onPublish={publishAuction}
-          onViewBuyer={() => selectRole('buyer')}
+          onViewBuyer={goToBuyerCard}
         />
       ) : (
         <BuyerFlow
@@ -218,9 +291,9 @@ function App() {
           bidStatus={bidStatus}
           minimumBid={minimumBid}
           bidHint={bidHint}
-          onOpen={() => setBuyerScreen('card')}
-          onBack={() => setBuyerScreen('feed')}
-          onGoToSeller={() => selectRole('seller')}
+          onOpen={() => { setBuyerScreen('card'); reachMetrikaGoal(AUCTION_GOALS.buyerLotOpened, { step: 'buyer-feed', role: 'buyer' }) }}
+          onBack={() => { setBuyerScreen('feed'); reachMetrikaGoal(AUCTION_GOALS.buyerBackToList, { step: 'buyer-card', role: 'buyer' }) }}
+          onGoToSeller={goToSellerSetup}
           onBidValue={(value) => {
             setBidValue(value.replace(/[^0-9]/g, ''))
             if (bidStatus !== 'pending') setBidStatus('idle')
@@ -242,13 +315,14 @@ function App() {
                 <option value="error">Вернуть ошибку</option>
               </select>
             </label>
-            <button className="demo-panel__finish" disabled={auction.status !== 'published'} onClick={() => setAuction((current) => ({ ...current, status: 'finished' }))}>
+            <button className="demo-panel__finish" disabled={auction.status !== 'published'} onClick={() => { setAuction((current) => ({ ...current, status: 'finished' })); reachMetrikaGoal(AUCTION_GOALS.auctionFinished, { step: 'demo-panel', role: role as MetrikaRole, result: 'success' }) }}>
               Завершить аукцион
             </button>
           </div>
           <button className="demo-panel__reset" onClick={resetDemo}>Сбросить демо</button>
         </aside>}
       </section>
+      </>}
     </main>
   )
 }
